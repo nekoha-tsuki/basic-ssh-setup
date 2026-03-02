@@ -56,7 +56,7 @@ chown -R "$USERNAME:" "$USER_HOME/.ssh"
 
 # 4. Test sudo permission
 echo "Testing sudo permissions for $USERNAME programmatically..."
-if sudo -l -U "$USERNAME" | grep -q -E "(ALL : ALL) NOPASSWD: ALL|(ALL) NOPASSWD: ALL|(ALL : ALL) ALL|(ALL) ALL"; then
+if sudo -l -U "$USERNAME" | grep -q -E "[[:space]]*\((ALL|ALL : ALL)\)[[:space]]*(NOPASSWD: )?ALL"; then
     echo "SUCCESS: Sudo privileges confirmed."
 else
     echo "WARNING: Could not automatically verify sudo privileges."
