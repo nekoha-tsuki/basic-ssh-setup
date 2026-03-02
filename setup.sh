@@ -63,7 +63,9 @@ else
 fi
 
 # 5. First Manual Test (Wait for user)
-SERVER_IP=$(hostname -I | awk '{print $1}')
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[[ -z "$SERVER_IP" ]] && SERVER_IP="<YOUR_SERVER_IP>" # Fallback if hostname -I fails
+
 echo ""
 echo "========================================================="
 echo "ACTION REQUIRED: Test the initial SSH login and Sudo"
@@ -76,14 +78,18 @@ echo "========================================================="
 
 while true; do
     read -r -p "Did the SSH key login AND sudo command succeed? (Y/n): " yn
-    case $yn in[Yy]* | "" ) 
+    case "$yn" in
+        [Yy]* | "" ) 
             echo "Proceeding to harden SSH..."
             break
-            ;;[Nn]* ) 
+            ;;
+        [Nn]* ) 
             echo "Aborting script. Please fix the SSH connection or sudo setup and try again."
             exit 1
             ;;
-        * ) echo "Please answer Y or n.";;
+        * ) 
+            echo "Please answer Y or n."
+            ;;
     esac
 done
 
@@ -106,7 +112,10 @@ fi
 
 # Apply a drop-in config to ensure cloud-init files don't override the settings
 mkdir -p /etc/ssh/sshd_config.d
-echo -e "PermitRootLogin no\nPasswordAuthentication no" > /etc/ssh/sshd_config.d/99-custom-hardening.conf
+cat <<EOF > /etc/ssh/sshd_config.d/99-custom-hardening.conf
+PermitRootLogin no
+PasswordAuthentication no
+EOF
 
 # Validate the SSH configuration syntax before attempting a restart
 echo "Testing SSH configuration syntax..."
@@ -138,7 +147,7 @@ echo "========================================================="
 
 while true; do
     read -r -p "Did the second SSH key login succeed? (Y/n): " yn
-    case $yn in
+    case "$yn" in
         [Yy]* | "" ) 
             echo "SSH successfully hardened."
             break
@@ -151,7 +160,9 @@ while true; do
             echo "Changes reverted safely. Aborting script."
             exit 1
             ;;
-        * ) echo "Please answer Y or n.";;
+        * ) 
+            echo "Please answer Y or n."
+            ;;
     esac
 done
 
@@ -162,3 +173,4 @@ echo "Setup Complete!"
 echo "User '$USERNAME' is fully configured with passwordless sudo."
 echo "Root login and password authentication are now disabled."
 echo "========================================================="
+
