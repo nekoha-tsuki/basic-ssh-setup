@@ -19,6 +19,12 @@ if [[ -z "$PUBKEY" ]]; then
     exit 1
 fi
 
+read -r -p "Enter the custom port (e.g., 2222): " PORT
+if [[ -z "$PORT" ]]; then
+    echo "Port cannot be empty."
+    exit 1
+fi
+
 # 1. Create the user
 if id "$USERNAME" &>/dev/null; then
     echo "User $USERNAME already exists."
@@ -55,11 +61,20 @@ chmod 600 "$USER_HOME/.ssh/authorized_keys"
 chown -R "$USERNAME:" "$USER_HOME/.ssh"
 
 # 4. Test sudo permission
-echo "Testing sudo permissions for $USERNAME programmatically..."
-if sudo -l -U "$USERNAME" | grep -q -E "[[:space]]*\((ALL|ALL : ALL)\)[[:space]]*(NOPASSWD: )?ALL"; then
-    echo "SUCCESS: Sudo privileges confirmed."
+echo "Testing sudo privileges for $USERNAME programmatically..."
+
+# Capture the output of sudo -l into a variable
+SUDO_OUT=$(sudo -l -U "$USERNAME" 2>/dev/null)
+
+# Use grep -F (fixed strings) to check for BOTH conditions (Logical AND)
+if echo "$SUDO_OUT" | grep -qF "(ALL : ALL) ALL" && echo "$SUDO_OUT" | grep -q "NOPASSWD: ALL"; then
+    echo "SUCCESS: Both standard Sudo and NOPASSWD privileges confirmed."
+elif echo "$SUDO_OUT" | grep -q "NOPASSWD: ALL"; then
+    echo "SUCCESS: NOPASSWD sudo confirmed (Standard sudo group missing)."
+elif echo "$SUDO_OUT" | grep -qF "(ALL : ALL) ALL"; then
+    echo "WARNING: Standard sudo is present, but NOPASSWD is MISSING! The user will be prompted for a password."
 else
-    echo "WARNING: Could not automatically verify sudo privileges."
+    echo "WARNING: Could not automatically verify any sudo privileges."
 fi
 
 # 5. First Manual Test (Wait for user)
@@ -94,27 +109,22 @@ while true; do
 done
 
 # 6. Disable root login and password authentication
-echo "Disabling root login and password authentication..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak # Create backup just in case
+echo "Disabling root login and password authentication via drop-in config..."
 
-# Disable in the main config
-if grep -qE '^#?PermitRootLogin' /etc/ssh/sshd_config; then
-    sed -i -E 's/^#?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-else
-    echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+# FIX: Check if the Include directive is in the main config. If not, add it.
+if ! grep -qEi "^Include.*sshd_config\.d" /etc/ssh/sshd_config; then
+    echo "Adding Include directive for sshd_config.d to the top of /etc/ssh/sshd_config..."
+    sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 fi
 
-if grep -qE '^#?PasswordAuthentication' /etc/ssh/sshd_config; then
-    sed -i -E 's/^#?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-else
-    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
-fi
-
-# Apply a drop-in config to ensure cloud-init files don't override the settings
+# FIX: We now ONLY use the drop-in configuration without modifying sshd_config defaults
 mkdir -p /etc/ssh/sshd_config.d
 cat <<EOF > /etc/ssh/sshd_config.d/99-custom-hardening.conf
+# Custom SSH Hardening overrides
+Port ${PORT}
 PermitRootLogin no
 PasswordAuthentication no
+PubkeyAuthentication yes
 EOF
 
 # Validate the SSH configuration syntax before attempting a restart
@@ -130,7 +140,6 @@ if sshd -t; then
     fi
 else
     echo "ERROR: SSH configuration syntax is invalid! Reverting changes..."
-    mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
     rm -f /etc/ssh/sshd_config.d/99-custom-hardening.conf
     echo "Changes reverted safely. Aborting script."
     exit 1
@@ -154,7 +163,6 @@ while true; do
             ;;
         [Nn]* ) 
             echo "Reverting SSH configuration to prevent lockout..."
-            mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
             rm -f /etc/ssh/sshd_config.d/99-custom-hardening.conf
             systemctl restart sshd || systemctl restart ssh
             echo "Changes reverted safely. Aborting script."
@@ -173,4 +181,3 @@ echo "Setup Complete!"
 echo "User '$USERNAME' is fully configured with passwordless sudo."
 echo "Root login and password authentication are now disabled."
 echo "========================================================="
-
