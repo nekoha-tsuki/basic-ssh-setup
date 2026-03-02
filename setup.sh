@@ -25,7 +25,7 @@ read -r -p "Enter the custom SSH port (press Enter for default 22): " SSH_PORT
 SSH_PORT=${SSH_PORT:-22} # Default to 22 if input is empty
 
 # Validate port number
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] ||[ "$SSH_PORT" -gt 65535 ]; then
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] ||[ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
     echo "Error: Invalid port number. Must be between 1 and 65535."
     exit 1
 fi
@@ -45,10 +45,8 @@ fi
 # ==========================================
 echo "Granting sudo permissions and configuring passwordless sudo for $USERNAME..."
 if grep -q "^sudo:" /etc/group; then
-    # Debian/Ubuntu systems
     usermod -aG sudo "$USERNAME"
 elif grep -q "^wheel:" /etc/group; then
-    # RHEL/CentOS systems
     usermod -aG wheel "$USERNAME"
 fi
 
@@ -69,7 +67,7 @@ chmod 600 "$USER_HOME/.ssh/authorized_keys"
 chown -R "$USERNAME:" "$USER_HOME/.ssh"
 
 # ==========================================
-# 4. Test sudo permission (Fixed Logic)
+# 4. Test sudo permission
 # ==========================================
 echo "Testing sudo privileges for $USERNAME programmatically..."
 SUDO_OUT=$(sudo -l -U "$USERNAME" 2>/dev/null)
@@ -94,7 +92,7 @@ echo ""
 echo "========================================================="
 echo "ACTION REQUIRED: Test the initial SSH login and Sudo"
 echo "Please open a NEW terminal window and run:"
-echo "ssh $USERNAME@$SERVER_IP  (Add '-p <port>' if your server already uses a custom port)"
+echo "ssh $USERNAME@$SERVER_IP  (Add '-p <current_port>' if not 22)"
 echo ""
 echo "Once logged in, verify sudo access by running:"
 echo "sudo ls /root"
@@ -103,7 +101,7 @@ echo "========================================================="
 while true; do
     read -r -p "Did the SSH key login AND sudo command succeed? (Y/n): " yn
     case "$yn" in
-        [Yy]* ) 
+	 [Yy]* ) 
             echo "Proceeding to harden SSH and change port..."
             break
             ;;
@@ -119,6 +117,14 @@ done
 # 6. Disable root login, pass auth, & Set Port
 # ==========================================
 echo "Configuring SSH hardening and custom port ($SSH_PORT)..."
+
+# --- Systemd Socket Check (Ubuntu 22.04+ Fix) ---
+if systemctl is-active --quiet ssh.socket; then
+    echo "--> WARNING: systemd ssh.socket detected! This overrides sshd_config ports."
+    echo "--> Disabling ssh.socket and switching to standard ssh.service..."
+    systemctl disable --now ssh.socket
+    systemctl enable --now ssh.service
+fi
 
 # --- Firewall Handling ---
 if [ "$SSH_PORT" -ne 22 ]; then
@@ -138,22 +144,18 @@ if [ "$SSH_PORT" -ne 22 ]; then
         if command -v semanage &>/dev/null; then
             echo "--> SELinux is Enforcing. Updating SSH port context to allow $SSH_PORT..."
             semanage port -a -t ssh_port_t -p tcp "$SSH_PORT" 2>/dev/null || semanage port -m -t ssh_port_t -p tcp "$SSH_PORT"
-        else
-            echo "--> WARNING: SELinux is enforcing but 'semanage' is not installed."
-            echo "--> SSH may fail to bind to port $SSH_PORT."
         fi
     fi
-    
-    echo "========================================================="
-    echo "CLOUD FIREWALL WARNING:"
-    echo "If you are using AWS, Azure, GCP, OCI, etc., ensure port $SSH_PORT"
-    echo "is allowed in your Cloud Security Group / VPC Firewall rules!"
-    echo "========================================================="
 fi
+
+# --- Backup and Modify Main Config ---
+cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+
+# Fix: Comment out any active 'Port' declarations in the main config so we don't open multiple ports
+sed -i -E 's/^([[:space:]]*Port[[:space:]]+[0-9]+)/#\1/ig' /etc/ssh/sshd_config
 
 # Check if Include directive exists, add if missing
 if ! grep -qEi "^Include.*sshd_config\.d" /etc/ssh/sshd_config; then
-    echo "Adding Include directive for sshd_config.d to the top of /etc/ssh/sshd_config..."
     sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 fi
 
@@ -180,8 +182,9 @@ if sshd -t; then
     if [[ -n "$SSH_SERVICE" ]]; then
         # Try to restart and catch failures (e.g. port binding issues)
         if ! systemctl restart "$SSH_SERVICE"; then
-            echo "ERROR: $SSH_SERVICE failed to restart! (Possible port binding or SELinux issue)."
+            echo "ERROR: $SSH_SERVICE failed to restart! (Possible port binding issue)."
             echo "Reverting configuration to prevent lockout..."
+            mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
             rm -f /etc/ssh/sshd_config.d/99-custom-hardening.conf
             systemctl restart "$SSH_SERVICE"
             exit 1
@@ -191,6 +194,7 @@ if sshd -t; then
     fi
 else
     echo "ERROR: SSH configuration syntax is invalid! Reverting changes..."
+    mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
     rm -f /etc/ssh/sshd_config.d/99-custom-hardening.conf
     echo "Changes reverted safely. Aborting script."
     exit 1
@@ -212,10 +216,13 @@ while true; do
     case "$yn" in
         [Yy]* ) 
             echo "SSH successfully hardened."
+            # Remove the backup as we successfully verified everything
+            rm -f /etc/ssh/sshd_config.bak
             break
             ;;
         [Nn]* ) 
             echo "Reverting SSH configuration to prevent lockout..."
+            mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
             rm -f /etc/ssh/sshd_config.d/99-custom-hardening.conf
             [[ -n "$SSH_SERVICE" ]] && systemctl restart "$SSH_SERVICE"
             echo "Changes reverted safely. Aborting script."
@@ -233,5 +240,5 @@ echo "========================================================="
 echo "Setup Complete!"
 echo "User '$USERNAME' is configured with passwordless sudo."
 echo "Root login and password authentication are disabled."
-echo "SSH is now running on port $SSH_PORT."
+echo "SSH is now exclusively running on port $SSH_PORT."
 echo "========================================================="
